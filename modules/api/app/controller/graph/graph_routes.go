@@ -44,5 +44,6 @@ func Routes(r *gin.Engine) {
 	grfanaapi.GET("/v1/grafana/metrics/find", GrafanaMainQuery)
 	grfanaapi.POST("/v1/grafana/render", GrafanaRender)
 	grfanaapi.GET("/v1/grafana/render", GrafanaRender)
+        grfanaapi.GET("/v1/grafana/tag_first/metrics/find", GrafanaTagQuery)
 
 }
