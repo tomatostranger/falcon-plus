@@ -38,6 +38,19 @@ type APIGrafanaMainQueryOutputs struct {
 	Text       string `json:"text"`
 }
 
+type APIGrafanaTagQueryInputs struct {
+	Limit int 	`json:"limit"  form:"limit"`
+	Query string `json:"query" form:"query"`
+}
+
+type APIGrafanaTagQueryOutputs struct {
+	Expandable bool   `json:"expandable"`
+	Text       string `json:"text"`
+}
+
+
+
+
 //for return a host list for api test
 func repsonseDefault(limit int) (result []APIGrafanaMainQueryOutputs) {
 	result = []APIGrafanaMainQueryOutputs{}
@@ -52,6 +65,20 @@ func repsonseDefault(limit int) (result []APIGrafanaMainQueryOutputs) {
 		})
 	}
 	return
+}
+
+// for return a tag list for api test
+func tagResponseDefault(limit int) (result []APIGrafanaTagQueryOutputs) {
+	result = []APIGrafanaTagQueryOutputs{}
+	enpsHelp := m.TagEndpoint{}
+	enps := []m.TagEndpoint{}
+	db.Graph.Table(enpsHelp.TableName()).Limit(limit).Scan(&enps)
+	for _, h := range enps {
+		result = append(result, APIGrafanaTagQueryOutputs{
+			Expandable: true,
+			Text: h.tag,
+		})
+	}
 }
 
 //for find host list & grafana template searching, regexp support
@@ -87,6 +114,31 @@ func cutEndpointCounterHelp(regexpKey string) (hosts []string, counter string) {
 	}
 	return
 }
+
+// for resolve mixed query with tag & endpoint & metric of query string
+func cutTagEndpointMetricHelp(regexpKey string) (tags []string, hosts []string, metrics []string) {
+	r, _ := regexp.Compile("^(.*)#(.*)#(.*)")
+	matchedList := r.FindAllStringSubmatch(regexKey, 1)
+	if len(matchedList) != 0 {
+		if len(matchedList[0]) > 1 {
+			tagsTmp := matchedList[0][1]
+			tags := trimSplitHelper(tagsTmp, ",")
+			hostsTmp := matchedList[0][2]
+			hosts := trimSplitHelper(hostsTmp, ",")
+			metricsTmp := matchedList[0][3]
+			metrics := trimSplitHelper(metricsTmp, ",")
+		}
+	} else {
+		log.Errorf("grafana query inputs error: %v", regexKey)
+	}
+	return
+}
+
+func trimSplitHelper(key string, split_key string) (keys []string){
+	keys = strings.Split(strings.TrimSpace(key), split_key)
+	return 
+}
+
 
 func expandableChecking(counter string, counterSearchKeyWord string) (expsub string, needexp bool) {
 	re := regexp.MustCompile("(\\.\\+|\\.\\*)\\s*$")
@@ -202,6 +254,57 @@ func responseCounterRegexp(regexpKey string) (result []APIGrafanaMainQueryOutput
 	return
 }
 
+// for return metric list of endpoints
+def responseMetricRegexp(regexpKey string) (result []APIGrafanaTagQueryOutputs) {
+	result = []APIGrafanaTagQueryOutputs{}
+	tags, hosts, metrics := cutTagEndpointMetricHelp(regexKey)
+	// may too much result, denied
+	if len(hosts) == 0 && len(metrics) == 0 {
+		return
+	}
+	// Precision match
+	hostIds = findEndpointIdByEndpointList(hosts)
+	if len(hostIds) == 0{
+		return
+	}
+	idConcact, _ := u.ArrInt64ToString(hostIds)
+	//for get right table name
+	countHelp := m.EndpointCounter{}
+	
+
+	// todo: more sql efficient
+	for metric := range metrics {
+		counters := []m.EndpointCounter{}
+		db.Graph.Table(countHelp.TableName()).Where(fmt.Sprintf("endpoint_id IN (%s) AND counter regexp '%s'", idConcact, metrics)).Scan(&counters)
+		for _, c := range counters {
+			result = append(result, APIGrafanaMainQueryOutputs{
+				Text:       expsub,
+				Expandable: false,
+			})
+		}
+		append(counters, counterTmp...)
+	}
+	//if not any counter matched
+	if len(result) == 0 {
+		return
+	}
+	
+	result = addAddItionalItems(result, regexpKey)
+	return
+
+
+
+
+
+
+}
+
+
+
+
+
+
+
 func GrafanaMainQuery(c *gin.Context) {
 	inputs := APIGrafanaMainQueryInputs{}
 	inputs.Limit = 1000
@@ -222,6 +325,27 @@ func GrafanaMainQuery(c *gin.Context) {
 	c.JSON(200, output)
 	return
 }
+
+func GrafanaTagQuery(c *gin.Context) {
+	inputs := APIGrafanaTagQueryInputs{}
+	inputs.limit = 1000
+	inputs.Query = "!N!"
+	if err := c.Bind(&inputs); err != nil{
+		h.JSONR(c, badstatus, err.Error())
+		return
+	}
+	log.Debugf("got query string: %s", inputs.Query)
+	output := []APIGrafanaTagQueryOutputs{}
+	if inputs.Query == "!N!" {
+		output = tagResponseDefault(inputs.Limit)
+	} else if strings.Contains(inputs.Query, '#'){
+		output = responseMetricRegexp(inputs.Query)
+	}
+
+
+
+}
+
 
 type APIGrafanaRenderInput struct {
 	Target        []string `json:"target" form:"target"  binding:"required"`
