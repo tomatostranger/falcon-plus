@@ -282,57 +282,67 @@ func GrafanaRender(c *gin.Context) {
 	return
 }
 
-type APIGrafanaTagQueryInputs struct {
-	Limit int 	`json:"limit"  form:"limit"`
-	Query string `json:"query" form:"query"`
-}
-
-type APIGrafanaTagQueryOutputs struct {
-	Expandable bool   `json:"expandable"`
-	Text       string `json:"text"`
-}
-
 // for return a tag list for api test
-func tagResponseDefault(limit int) (result []APIGrafanaTagQueryOutputs) {
-	result = []APIGrafanaTagQueryOutputs{}
-	enpsHelp := m.TagEndpoint{}
-	enps := []m.TagEndpoint{}
-	db.Graph.Table(enpsHelp.TableName()).Limit(limit).Scan(&enps)
-	for _, h := range enps {
-		result = append(result, APIGrafanaTagQueryOutputs{
+func tagResponseDefault(limit int) (result []APIGrafanaMainQueryOutputs) {
+	result = []APIGrafanaMainQueryOutputs{}
+	tagEnpHelp := m.TagEndpoint{}
+	tagEnps := []m.TagEndpoint{}
+	db.Graph.Table(tagEnpHelp.TableName()).Select("distinct tag").Limit(limit).Scan(&tagEnps)
+	for _, h := range tagEnps {
+		result = append(result, APIGrafanaMainQueryOutputs{
 			Expandable: true,
-			Text: h.tag,
+			Text:       h.Tag,
 		})
-	}
-}
-
-
-// for resolve mixed query with tag & endpoint & metric of query string
-func cutTagEndpointMetricHelp(regexpKey string) (tags []string, hosts []string, metrics []string) {
-	r, _ := regexp.Compile("^(.*)#(.*)#(.*)")
-	matchedList := r.FindAllStringSubmatch(regexKey, 1)
-	if len(matchedList) != 0 {
-		if len(matchedList[0]) > 1 {
-			tagsTmp := matchedList[0][1]
-			tags := trimSplitHelper(tagsTmp, ",")
-			hostsTmp := matchedList[0][2]
-			hosts := trimSplitHelper(hostsTmp, ",")
-			metricsTmp := matchedList[0][3]
-			metrics := trimSplitHelper(metricsTmp, ",")
-		}
-	} else {
-		log.Errorf("grafana query inputs error: %v", regexKey)
 	}
 	return
 }
 
-func trimSplitHelper(key string, split_key string) (keys []string){
-	keys = strings.Split(strings.TrimSpace(key), split_key)
-	return 
+func tagResponse(regexKey string) (result []APIGrafanaMainQueryOutputs) {
+	result = []APIGrafanaMainQueryOutputs{}
+	tagEnpHelp := m.TagEndpoint{}
+	tagEnps := []m.TagEndpoint{}
+	tags := trimSplitHelper(regexKey, ",")
+	db.Graph.Table(tagEnpHelp.TableName()).Where("tag in (*)", tags).Scan(&tagEnps)
+	for _, h := range tagEnps {
+		result = append(result, APIGrafanaMainQueryOutputs{
+			Expandable: true,
+			Text:       h.Tag,
+		})
+	}
+	return
 }
 
+// for resolve mixed query with tag & endpoint & metric of query string
+func cutTagEndpointMetricHelp(regexKey string) (tags []string, hosts []string, metrics []string) {
+	r, _ := regexp.Compile("^(.*)##(.*)##(.*)")
+	matchedList := r.FindAllStringSubmatch(regexKey, 1)
+	if len(matchedList) != 0 {
+		if len(matchedList[0]) > 1 {
+			tagsTmp := matchedList[0][1]
+			tagsTmp = strings.Replace(tagsTmp, "#", ".", -1)
+			tags = trimSplitHelper(tagsTmp, ",")
 
+			hostsTmp := matchedList[0][2]
+			hostsTmp = strings.Replace(hostsTmp, "#", ".", -1)
+			hosts = trimSplitHelper(hostsTmp, ",")
 
+			metricsTmp := matchedList[0][3]
+			metricsTmp = strings.Replace(metricsTmp, "#", ".", -1)
+			metrics = trimSplitHelper(metricsTmp, ",")
+		}
+	} else {
+		log.Errorf("grafana query inputs error: %v", regexKey)
+	}
+	log.Debug(tags)
+	log.Debug(hosts)
+	log.Debug(metrics)
+	return
+}
+
+func trimSplitHelper(key string, split_key string) (keys []string) {
+	keys = strings.Split(strings.TrimSpace(key), split_key)
+	return
+}
 
 // tag, endpoint precision match
 func findEndpointInByTagEndpointlist(tags []string, hosts []string) []int64 {
@@ -340,13 +350,19 @@ func findEndpointInByTagEndpointlist(tags []string, hosts []string) []int64 {
 	enps := []m.Endpoint{}
 	tagEnpsHelp := m.TagEndpoint{}
 	tagEnps := []m.TagEndpoint{}
-	do.Graph.Table(tagEnpsHelp.TableName()).Where("tag in (?)", tags).Scan(&tagEnps)
-	var endpointIds []uint
-	for tag := range tagEnps {
-		append(endpointIds, tag.EndpointID)
+
+	// tags 表示必须满足所有，拿到所有的tag实体去找满足的endpoint -> 所有的 endpoint_id
+	db.Graph.Table(tagEnpsHelp.TableName()).Where("tag in (?)", tags).Scan(&tagEnps)
+	var endpointIds []int
+	for _, tag := range tagEnps {
+		endpointIds = append(endpointIds, tag.EndpointID)
 	}
-	if len(hosts) == 0 {
-		do.Graph.Table(enpsHelp.TableName()).Where("id in (?)", endpointIds).Scan(&enps)
+
+	if len(hosts) == 0 || hosts[0] == "" {
+		// 没有指定 endpoint，取打了该tag 的所有endpoint
+		db.Graph.Table(enpsHelp.TableName()).Where("id in (?)", endpointIds).Scan(&enps)
+	} else {
+		db.Graph.Table(enpsHelp.TableName()).Where("id in (?) and endpoint in (?)", endpointIds, hosts).Scan(&enps)
 	}
 
 	hostIds := make([]int64, len(enps))
@@ -356,62 +372,161 @@ func findEndpointInByTagEndpointlist(tags []string, hosts []string) []int64 {
 	return hostIds
 }
 
-
-
 // for return metric list of endpoints
-def responseMetricRegexp(regexpKey string) (result []APIGrafanaTagQueryOutputs) {
-	result = []APIGrafanaTagQueryOutputs{}
+func responseMetricRegexp(regexKey string) (result []APIGrafanaMainQueryOutputs) {
+	result = []APIGrafanaMainQueryOutputs{}
 	tags, hosts, metrics := cutTagEndpointMetricHelp(regexKey)
 	// may too much result, denied
 	if len(hosts) == 0 && len(metrics) == 0 {
 		return
 	}
 	// Precision match
-	hostIds = findEndpointIdByEndpointList(tags, hosts)
+	hostIds := findEndpointInByTagEndpointlist(tags, hosts)
 
-	if len(hostIds) == 0{
+	if len(hostIds) == 0 {
 		return
 	}
 	idConcact, _ := u.ArrInt64ToString(hostIds)
 	//for get right table name
 	countHelp := m.EndpointCounter{}
-	
-
 	// todo: more sql efficient
-	for metric := range metrics {
+	for _, metric := range metrics {
 		counters := []m.EndpointCounter{}
-		db.Graph.Table(countHelp.TableName()).Where(fmt.Sprintf("endpoint_id IN (%s) AND counter regexp '%s'", idConcact, metrics)).Scan(&counters)
+		db.Graph.Table(countHelp.TableName()).Where(fmt.Sprintf("endpoint_id IN (%s) AND counter regexp '%s'", idConcact, metric)).Scan(&counters)
 		for _, c := range counters {
 			result = append(result, APIGrafanaMainQueryOutputs{
-				Text:       expsub,
+				Text:       c.Counter,
 				Expandable: false,
 			})
 		}
-		append(counters, counterTmp...)
 	}
 	//if not any counter matched
 	if len(result) == 0 {
 		return
 	}
-	
-	result = addAddItionalItems(result, regexpKey)
+	result = addAddItionalItems(result, regexKey)
 	return
 }
 
 func GrafanaTagQuery(c *gin.Context) {
-	inputs := APIGrafanaTagQueryInputs{}
-	inputs.limit = 1000
+	inputs := APIGrafanaMainQueryInputs{}
+	inputs.Limit = 1000
 	inputs.Query = "!N!"
-	if err := c.Bind(&inputs); err != nil{
+	if err := c.Bind(&inputs); err != nil {
 		h.JSONR(c, badstatus, err.Error())
 		return
 	}
+	fmt.Println(inputs.Query)
 	log.Debugf("got query string: %s", inputs.Query)
-	output := []APIGrafanaTagQueryOutputs{}
-	if inputs.Query == "!N!" {
+	output := []APIGrafanaMainQueryOutputs{}
+	if inputs.Query == "!N!" || inputs.Query == ".*" {
 		output = tagResponseDefault(inputs.Limit)
-	} else if strings.Contains(inputs.Query, '#'){
+	} else if !strings.Contains(inputs.Query, "#") {
+		output = tagResponse(inputs.Query)
+	} else if strings.Contains(inputs.Query, "#") {
 		output = responseMetricRegexp(inputs.Query)
 	}
+	c.JSON(200, output)
+	return
 }
 
+func NewGrafanaRender(c *gin.Context) {
+	inputs := APIGrafanaRenderInput{}
+	//set default step is 60
+	inputs.Step = 60
+	inputs.ConsolFun = "AVERAGE"
+	if err := c.Bind(&inputs); err != nil {
+		h.JSONR(c, badstatus, err.Error())
+		return
+	}
+	log.Debug(inputs)
+	respList := []*cmodel.GraphQueryResponse{}
+	for _, target := range inputs.Target {
+		tags, hosts, metrics := cutTagEndpointMetricHelp(target)
+
+		// 通过 tags + metrics 过滤出 counter，
+		// 如果有 endpoint，优先对 endpoint 进行过滤
+		// 如果有多个 metric，对多个 metric 进行拼接
+		// 之后对 tag 做过滤，要同时满足所有的 tag -> 字符串拼接
+
+		// region=beijing3,server_name=haproxy##downtime,ctime
+		// 1. 获取到counter：
+		// select * from endpoint_counter where (counter like '%region=beijing3%' and counter like '%server_name=haproxy%') and (counter like 'downtime/%' or counter like 'ctime/%')
+		// 2. 获取到 endpoint：
+		// 如果regexp 中提供endpoint，直接取即可；如果没有，从上述的endpoint_counter中取。
+		ecHelp := m.EndpointCounter{}
+		counters := []m.EndpointCounter{}
+
+		enpHelp := m.Endpoint{}
+		endpoints := []m.Endpoint{}
+
+		// opt: make([]string, len(tags))
+		var tagSlice []string
+		if len(tags) > 0 && tags[0] != "" {
+			for indx, tag := range tags {
+				if indx > 0 {
+					tagSlice = append(tagSlice, " and ")
+				}
+				tagSlice = append(tagSlice, fmt.Sprintf("counter like '%%%s%%'", tag))
+			}
+		}
+		tagTmpSql := strings.Join(tagSlice, "")
+		var metricSlice []string
+		if len(metrics) > 0 && metrics[0] != "" {
+			for indx, metric := range metrics {
+				if indx > 0 {
+					metricSlice = append(metricSlice, " or ")
+				}
+				metricSlice = append(metricSlice, fmt.Sprintf("counter like '%s/%%'", metric))
+			}
+		}
+		metricTmpSql := strings.Join(metricSlice, "")
+		var counterSql string
+		if metricTmpSql != "" {
+			counterSql = tagTmpSql + "and (" + metricTmpSql + ")"
+		} else {
+			counterSql = metricTmpSql
+		}
+
+		db.Graph.Table(ecHelp.TableName()).Select("distinct counter, endpoint_id").Where(counterSql).Scan(&counters)
+
+		if len(hosts) > 0 && hosts[0] != "" {
+			// 根据 hosts 获取 endpoint
+			db.Graph.Table(enpHelp.TableName()).Where("endpoint in (?)", hosts).Scan(&endpoints)
+		} else {
+			// 根据counter sql 获取 endpoint_id -> endpoint
+			var hostIds []int
+			for _, counter := range counters {
+				hostIds = append(hostIds, counter.EndpointID)
+			}
+			//log.Debug(hostIds)
+			db.Graph.Table(enpHelp.TableName()).Where("id in (?)", hostIds).Scan(&endpoints)
+		}
+
+		//log.Debug(counters)
+		//log.Debug(endpoints)
+
+		if len(counters) == 0 {
+			// 没有匹配到的继续执行，避免当grafana graph有多个查询时，其他正常的查询也无法渲染视图
+			continue
+		}
+		counterArr := make([]string, len(counters))
+		for indx, c := range counters {
+			counterArr[indx] = c.Counter
+		}
+
+		for _, endpoint := range endpoints {
+			for _, counter := range counters {
+				resp, err := fetchData(endpoint.Endpoint, counter.Counter, inputs.ConsolFun, inputs.From, inputs.Until, inputs.Step)
+				//log.Debug(resp)
+				if err != nil {
+					log.Debugf("query graph got error with: %v", inputs)
+				} else {
+					respList = append(respList, resp)
+				}
+			}
+		}
+	}
+	c.JSON(200, respList)
+	return
+}
