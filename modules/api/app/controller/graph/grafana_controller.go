@@ -297,6 +297,8 @@ func tagResponseDefault(limit int) (result []APIGrafanaMainQueryOutputs) {
 	return
 }
 
+
+
 func tagResponse(regexKey string) (result []APIGrafanaMainQueryOutputs) {
 	result = []APIGrafanaMainQueryOutputs{}
 	tagEnpHelp := m.TagEndpoint{}
@@ -528,5 +530,345 @@ func NewGrafanaRender(c *gin.Context) {
 		}
 	}
 	c.JSON(200, respList)
+	return
+}
+
+func GrafanaMultiQuery(c *gin.Context) {
+	inputs := APIGrafanaMainQueryInputs{}
+	inputs.Limit = 1000
+	inputs.Query = "!N!"
+	if err := c.Bind(&inputs); err != nil {
+		h.JSONR(c, badstatus, err.Error())
+		return
+	}
+	fmt.Println(inputs.Query)
+	log.Debugf("got query string: %s", inputs.Query)
+	output := []APIGrafanaMainQueryOutputs{}
+	if inputs.Query == "!N!" || inputs.Query == ".*" || !strings.Contains(inputs.Query, "#") {
+		output = typeResponseDefault(inputs.Limit)
+	} else if strings.Contains(inputs.Query, "##") {
+		output = multiTypeRegexp(inputs.Query, inputs.Limit)
+	}
+	c.JSON(200, output)
+	return
+}
+
+
+func typeResponseDefault(limit int) (typeOutputs []APIGrafanaMainQueryOutputs) {
+	typeOutputs = []APIGrafanaMainQueryOutputs{}
+	typeTag := APIGrafanaMainQueryOutputs{Expandable: true, Text: "tag#",}
+	typeEndpoint := APIGrafanaMainQueryOutputs{Expandable: true, Text: "endpoint#",}
+	typeMetric := APIGrafanaMainQueryOutputs{Expandable: true, Text: "metric#",}
+	typeEnd := APIGrafanaMainQueryOutputs{Expandable: false, Text: "!",}
+	typeOutputs = append(typeOutputs, typeTag, typeEndpoint, typeMetric, typeEnd)
+	return
+}
+
+func tagRelatedCounterFilter(tags []string) (tagFilter string) {
+	var tagSlice []string
+	for _, tag := range tags {
+		tagSlice = append(tagSlice, fmt.Sprintf("counter like '%%%s%%'", tag))
+	}
+	tagFilter = strings.Join(tagSlice, "and")
+	return
+}
+
+func endpointRelatedFilter(endpoints []string) (endpointFilter string){
+	endpointString, _ := u.ArrStringsToString(endpoints)
+	endpointFilter = fmt.Sprintf("endpoint.endpoint in (%s)", endpointString)
+	return
+
+}
+
+func metricRelatedCounterExclude(metrics []string) (metricExclude string) {
+	var metricSlice []string
+	for _, metric := range metrics {
+		metricSlice = append(metricSlice, fmt.Sprintf("counter not regexp '^%s/'", metric))
+	}
+	metricExclude = strings.Join(metricSlice, "and")
+	return
+}
+
+func multiTypeRegexp(regexKey string, limit int) (result []APIGrafanaMainQueryOutputs){
+	result = []APIGrafanaMainQueryOutputs{}
+	tags, endpoints, metrics, additionItem, err := parseMultiTypeHelp(regexKey)
+	log.Debug(tags)
+	log.Debug(endpoints)
+	log.Debug(metrics)
+	log.Debug(additionItem)
+	log.Debug(err)
+	if err != nil {
+		return
+	}
+	if additionItem.Type == 0 {
+		var typeString []string
+		switch additionItem.Level {
+		case 0:
+			if len(tags) > 0 && tags[0] == "*"{
+				typeString = []string{"endpoint#"}
+			}else{
+				typeString = []string{"tag#", "endpoint#"}
+			}
+		case 1:
+			if len(endpoints) > 0 && endpoints[0] == "*" {
+				typeString = []string{"metric#"}
+			}else {
+				typeString = []string{"endpoint#", "metric#"}
+			}
+		case 2:
+			if len(metrics) > 0 && metrics[0] == "*" {
+				typeString = []string {}
+			}else {
+				typeString = []string {"metric#"}
+			}
+		default: typeString = []string{}
+		}
+		for _, str := range typeString {
+			result = append(result, APIGrafanaMainQueryOutputs{
+				Text: str,
+				Expandable: true,
+			})
+		}
+		result = append(result, APIGrafanaMainQueryOutputs{
+			Text: "!",
+			Expandable: false,
+		})
+	} else {
+
+		tagHelp := m.TagEndpoint{}
+		tagRes := []m.TagEndpoint{}
+
+		enpHelp := m.Endpoint{}
+		enpRes := []m.Endpoint{}
+
+		counterHelp := m.EndpointCounter{}
+		counterRes := []m.EndpointCounter{}
+		switch additionItem.Level {
+		case 0:
+			// 返回所有其他 tag
+			db.Graph.Table(tagHelp.TableName()).Select("distinct tag").Where("tag not in (?)", tags).Limit(limit).Scan(&tagRes)
+			for _, tag := range tagRes {
+				result = append(result, APIGrafanaMainQueryOutputs{
+					Text: tag.Tag + "#",
+					Expandable: true,
+				})
+			}
+			if len(tags) == 0 {
+				result = append(result, APIGrafanaMainQueryOutputs{
+					Text: "*#",
+					Expandable: true,
+				})
+			}
+
+		case 1:
+			// 返回 tags 下的其他 endpoint
+			if len(tags) > 0 && tags[0] == "*"{
+				// select distinct endpoint from endpoint where endpoint not in endpoints;
+				db.Graph.Table(enpHelp.TableName()).Select("distinct endpoint").Where("endpoint not in (?)", endpoints).Limit(limit).Scan(&enpRes)
+			}else{
+				// select distinct endpoint_id from tag_endpoint where tag in tags;
+				db.Graph.Table(tagHelp.TableName()).Select("distinct endpoint_id").Where("tag in (?)", tags).Scan(&tagRes)
+				var enpIds []int
+				for _, tag := range tagRes {
+					enpIds = append(enpIds, tag.EndpointID)
+				}
+				// select distinct endpoint from endpoint where id in enpIds and endpoint not in endpoints;
+				db.Graph.Table(enpHelp.TableName()).Select("distinct endpoint").Where("id in (?) and endpoint not in (?)", enpIds, endpoints).Limit(limit).Scan(&enpRes)
+			}
+			for _, enp := range enpRes {
+				result = append(result, APIGrafanaMainQueryOutputs{
+					Text: enp.Endpoint + "#",
+					Expandable: true,
+				})
+			}
+			if len(tags) > 0 && tags[0] != "*" && len(endpoints) == 0  {
+				result = append(result, APIGrafanaMainQueryOutputs{
+					Text: "*#",
+					Expandable: true,
+				})
+			}
+
+		case 2:
+			// 返回有 tags 且属于 endpoints 的其他 metric
+
+			if len(tags) > 0 && tags[0] == "*" {
+				// select * from endpoint_counter join endpoint on endpoint_counter.endpoint_id = endpoint.id and endpoint.endpoint in [endpoints] and [metricExclude]
+				metricExclude := metricRelatedCounterExclude(metrics)
+				db.Graph.Table("endpoint_counter").Select("distinct endpoint_counter.counter").
+				Joins("left join endpoint on endpoint_counter.endpoint_id = endpoint.id").
+				Where("endpoint.endpoint  in (?)", endpoints).Where(metricExclude).
+				Limit(limit).Scan(&counterRes)
+
+
+			}else{
+				if len(endpoints) > 0 && endpoints[0] == "*" {
+					// select * from endpoint_counter where (counter like  tagSql) and (counter not regrexp metricsql)
+					tagFilter := tagRelatedCounterFilter(tags)
+					metricExclude := metricRelatedCounterExclude(metrics)
+					db.Graph.Table(counterHelp.TableName()).Select("distinct counter").Where(tagFilter).Where(metricExclude).Limit(limit).Scan(&counterRes)
+
+				}else{
+					// select * from endpoint_counter join endpoint on endpoint_counter.endpoint_id = endpoint.id and endpoint.endpoint in [endpoints] and [metricExclude] and [tagFilter]
+					tagFilter := tagRelatedCounterFilter(tags)
+					metricExclude := metricRelatedCounterExclude(metrics)
+					db.Graph.Table("endpoint_counter").Select("distinct endpoint_counter.counter").
+					Joins("left join endpoint on endpoint_counter.endpoint_id = endpoint.id").
+					Where(tagFilter).Where("endpoint.endpoint  in (?)", endpoints).Where(metricExclude).
+					Limit(limit).Scan(&counterRes)
+				}
+			}
+			for _, counter := range counterRes {
+				result = append(result, APIGrafanaMainQueryOutputs{
+					Text: counter.Counter,
+					Expandable: true,
+				})
+			}
+
+		}
+	}
+	log.Debug(result)
+
+	//result = addAddItionalItems(result, regexKey)
+	return
+}
+
+
+type APIAdditionItems struct {
+	Type  int `json:"type"`
+	Level int `json:"level"`
+}
+
+
+func validateTypeOrder(parts []string) (err error) {
+
+	// 对偶数下标的元素进行顺序的检验: tag -> endpoint -> metric
+	globalOrder := 0
+	curOrder := 0
+	for indx, t := range parts {
+		if indx & 1 == 0 {
+			switch t {
+			case "tag":  curOrder = 0
+			case "endpoint": curOrder = 1
+			case "metric": curOrder = 2
+			case "!": curOrder = 3
+			default:
+				return fmt.Errorf("bad grafana input query type: %s", t)
+			}
+		}
+		if globalOrder > 2 {
+			return fmt.Errorf("bad grafana input query after eof")
+		}
+		if curOrder >= globalOrder {
+			globalOrder = curOrder
+		} else {
+			return fmt.Errorf("bad grafana input query order")
+		}
+
+	}
+	return
+
+}
+
+func validateDataStarValue(parts []string) (err error) {
+
+	// 对奇数下标的元素进行数值检查：metric中不能含有 *，tag / endpoint 中只能有一个是 * 值
+	starCount := 0
+	for index, part := range parts {
+		if index & 1 != 0 {
+			if part == "*" {
+				starCount ++
+			}
+			if starCount > 1 {
+				return fmt.Errorf("bad grafana input query multiply star")
+			}
+		}
+	}
+	return nil
+}
+
+
+func parseMultiTypeHelp(regexKey string) (tags []string, endpoints []string, metrics []string, additionItem APIAdditionItems, err error) {
+
+	// query 的顺序必须为 tag -> endpoint -> metric -> !
+	// 对于不想指定的属性，通过填写 *# 来代表所有，如 tag##region=beijing3##*##downtime
+	// 其中 * 代表所有的 endpoint，代表查询 tag 为 region=beijing3 的所有 endpoint 的 downtime 指标
+	// todo 对于异常的 query 需要反馈给前端
+
+	parts := trimSplitHelper(regexKey, "##")
+	log.Debug(parts)
+
+	// 验证合法性
+	// 1. query 串从解析顺序为 tag -> endpoint -> metric -> !, 否则返回 err
+	// 2. query 数据中应该不超过 1 个 *
+
+	err = validateTypeOrder(parts)
+	if err != nil {
+		return
+	}
+
+	err = validateDataStarValue(parts)
+	if err != nil {
+		return
+	}
+
+	// 对于一条 query，需要判断接下来返回的是控制层级还是数据层级，如果是控制层级，该返回哪个层级；如果是数据层级，返回哪个层级的数据
+	// 需要两个参数：type，level （1/2/3/-1）
+	// Type
+	// 0: 控制层级
+	// 1：数据层级
+
+	// Level
+	// 0:tag 层级
+	// 1：endpoint 层级
+	// 2：metric 层级
+	// 3: ！(结束) 层级
+
+	additionItem = APIAdditionItems{}
+	for _, part := range parts {
+		if additionItem.Type == 0 {
+			switch part {
+			case "tag":
+				additionItem.Level = 0
+			case "endpoint":
+				additionItem.Level = 1
+			case "metric":
+				additionItem.Level = 2
+			case "!":
+				additionItem.Level = 3
+				return
+			}
+			additionItem.Type = 1
+		} else {
+			switch additionItem.Level {
+			case 0:
+				if len(tags) > 0 && (part == "*" || tags[0] == "*"){
+					err = fmt.Errorf("grafana query inputs error: tag contains *, can't be specific too")
+					return
+				}
+				tags = append(tags, part)
+			case 1:
+				if len(endpoints) > 0 && (part == "*" || endpoints[0] == "*"){
+					err = fmt.Errorf("grafana query inputs error: endpoint contains *, can't be specific")
+					return
+				}
+				endpoints = append(endpoints, part)
+			case 2:
+				if len(metrics) > 0 && (part == "*" || metrics[0] == "*"){
+					err = fmt.Errorf("grafana query inputs error: metric contains *, can't be specific")
+					return
+				}
+				metrics = append(metrics, part)
+			default:
+				err = fmt.Errorf("grafana query inputs error: %s", regexKey)
+				return
+			}
+			additionItem.Type = 0
+		}
+	}
+
+	log.Debug(tags)
+	log.Debug(endpoints)
+	log.Debug(metrics)
+	log.Debug(additionItem)
 	return
 }
