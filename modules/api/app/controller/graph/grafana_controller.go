@@ -574,7 +574,10 @@ func tagRelatedCounterFilter(tags []string) (tagFilter string) {
 }
 
 func endpointRelatedFilter(endpoints []string) (endpointFilter string){
-	endpointString, _ := u.ArrStringsToString(endpoints)
+	log.Debug("in endpoint related filter")
+	log.Debug(endpoints)
+	endpointString := u.ArrStringsToStringMust(endpoints)
+	log.Debug(endpointString)
 	endpointFilter = fmt.Sprintf("endpoint.endpoint in (%s)", endpointString)
 	return
 
@@ -673,7 +676,17 @@ func multiTypeRegexp(regexKey string, limit int) (result []APIGrafanaMainQueryOu
 					enpIds = append(enpIds, tag.EndpointID)
 				}
 				// select distinct endpoint from endpoint where id in enpIds and endpoint not in endpoints;
-				db.Graph.Table(enpHelp.TableName()).Select("distinct endpoint").Where("id in (?) and endpoint not in (?)", enpIds, endpoints).Limit(limit).Scan(&enpRes)
+				log.Debug(endpoints)
+				var enpFilter string 
+				var endpointFilter string
+				if len(enpIds) > 0 {
+					enpFilter = fmt.Sprintf("id in (%s)", u.ArrIntToStringMust(enpIds))
+				}
+				if len(endpoints) > 0 {
+					endpointFilter = fmt.Sprintf("endpoint not in (%s)", u.ArrStringsToStringMust(endpoints))
+				}
+				db.Graph.Table(enpHelp.TableName()).Select("distinct endpoint").Where(enpFilter).Where(endpointFilter).Limit(limit).Scan(&enpRes)
+				//db.Graph.Table(enpHelp.TableName()).Select("distinct endpoint").Where("id in (?) and endpoint not in (?)", enpIds, endpoints).Limit(limit).Scan(&enpRes)
 			}
 			for _, enp := range enpRes {
 				result = append(result, APIGrafanaMainQueryOutputs{
