@@ -47,7 +47,7 @@ func Routes(r *gin.Engine) {
 	grfanaapi.POST("/v1/grafana/tag_first/render", NewGrafanaRender)
 	grfanaapi.GET("/v1/grafana/tag_first/metrics/find", GrafanaTagQuery)
 
-	//grfanaapi.POST("/v1/grafana/multi_tag/render", MultiGrafanaRender)
+	grfanaapi.POST("/v1/grafana/multi_tag/render", GrafanaMultiRender)
 	grfanaapi.GET("/v1/grafana/multi_tag/metrics/find", GrafanaMultiQuery)
 
 }
