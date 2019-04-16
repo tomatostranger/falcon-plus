@@ -589,6 +589,15 @@ func metricRelatedCounterExclude(metrics []string) (metricExclude string) {
 	return
 }
 
+func metricRelatedCounterFilter(metrics []string) (metricFilter string) {
+	var metricSlice []string
+	for _, metric := range metrics {
+		metricSlice = append(metricSlice, fmt.Sprintf("counter like '%s/%%'", metric))
+	}
+	metricFilter = strings.Join(metricSlice, "or")	
+}
+
+
 func multiTypeRegexp(regexKey string, limit int) (result []APIGrafanaMainQueryOutputs){
 	result = []APIGrafanaMainQueryOutputs{}
 	tags, endpoints, metrics, additionItem, err := parseMultiTypeHelp(regexKey)
@@ -799,19 +808,23 @@ func validateDataStarValue(parts []string) (err error) {
 	return nil
 }
 
-
-func parseMultiTypeHelp(regexKey string) (tags []string, endpoints []string, metrics []string, additionItem APIAdditionItems, err error) {
-
-	// query 的顺序必须为 tag -> endpoint -> metric -> !
-	// 对于不想指定的属性，通过填写 *# 来代表所有，如 tag##region=beijing3##*##downtime
-	// 其中 * 代表所有的 endpoint，代表查询 tag 为 region=beijing3 的所有 endpoint 的 downtime 指标
-	// todo 对于异常的 query 需要反馈给前端
+func formatInputHelp(regexKey string) (parts []string, err error) {
+	// 切除query 末尾的 .*
 	re := regexp.MustCompile(`#\.\*$`)
 	regexKey = re.ReplaceAllString(regexKey, "#")
-	re = regexp.MustCompile(`\*#`)
+
+	// 将grafana自带的 * 或者 编辑框中的 *# 统一成 *#
+	// 等价于将 query 中的 *# 或者 *## 都统一成 *##
+	re = regexp.MustCompile(`\*#{1,2}`)
 	regexKey = re.ReplaceAllString(regexKey, "*##")
+
+	// 切除末尾的 ##
 	re = regexp.MustCompile(`##$`)
-        regexKey = re.ReplaceAllString(regexKey, "")
+	regexKey = re.ReplaceAllString(regexKey, "")
+
+	log.Debug(regexKey)
+	
+	// 切分 query
 	parts := trimSplitHelper(regexKey, "##")
 	log.Debug(parts)
 
@@ -828,6 +841,18 @@ func parseMultiTypeHelp(regexKey string) (tags []string, endpoints []string, met
 	if err != nil {
 		return
 	}
+
+	return parts, nil
+}
+
+
+func parseMultiTypeHelp(regexKey string) (tags []string, endpoints []string, metrics []string, additionItem APIAdditionItems, err error) {
+
+	// query 的顺序必须为 tag -> endpoint -> metric -> !
+	// 对于不想指定的属性，通过填写 * 来代表所有，如 tag##region=beijing3##*##downtime
+	// 其中 * 代表所有的 endpoint，代表查询 tag 为 region=beijing3 的所有 endpoint 的 downtime 指标
+	// todo 对于异常的 query 需要反馈给前端
+	parts := formatInputHelp(regexKey)
 
 	// 对于一条 query，需要判断接下来返回的是控制层级还是数据层级，如果是控制层级，该返回哪个层级；如果是数据层级，返回哪个层级的数据
 	// 需要两个参数：type，level （1/2/3/-1）
@@ -888,5 +913,73 @@ func parseMultiTypeHelp(regexKey string) (tags []string, endpoints []string, met
 	log.Debug(endpoints)
 	log.Debug(metrics)
 	log.Debug(additionItem)
+	return
+}
+
+func GrafanaMultiRender(c *gin.Context) {
+	inputs := APIGrafanaRenderInput{}
+	//set default step is 60
+	inputs.Step = 60
+	inputs.ConsolFun = "AVERAGE"
+	if err := c.Bind(&inputs); err != nil {
+		h.JSONR(c, badstatus, err.Error())
+		return
+	}
+	respList := []*cmodel.GraphQueryResponse{}
+	for _, target := range inputs.Target {
+
+		tags, endpoints, metrics, _, parseErr := parseMultiTypeHelp(target)
+		if parseErr != nil {
+			log.Error(fmt.Sprintf("parse render query exception: %v", parseErr))
+			continue
+		}
+		if len(metrics) == 0 {
+			log.Error(fmt.Sprintf("render query should contain at least one metric"))
+			continue
+		}
+		enpHelp := m.Endpoint{}
+		enpRes := []m.Endpoint{}
+		counterHelp := m.EndpointCounter{}
+		counterRes := []m.EndpointCounter{}
+
+		var tagFilter string
+		var endpointFilter string
+		var metricFilter string
+		
+		if len(tags) > 0 {
+			tagFilter = tagRelatedCounterFilter(tags)
+		}
+		if len(endpoints) > 0 {
+			endpointFilter = endpointRelatedFilter(endpoints)
+		}
+		metricFilter = metricRelatedCounterFilter(metrics)
+
+		// tags 和 endpoints 中最多一个为 *
+		if len(endpoints) > 0 && endpoints[0] == "*" {
+			// 通过 tag 来进行一层过滤，提高查询性能
+			// select * from endpoint left join tag_endpoint on endpoint.id = tag_endpoint.endpoint_id where tag_endpoint.tag in (?)
+			db.Graph.Table("endpoint").Select("distinct endpoint").Joins("left join tag_endpoint on endpoint.id = tag_endpoint.endpoint_id").
+			Where("tag.tag in (?)", u.ArrStringsToStringMust(tags)).Scan(&enpRes)
+		} else{
+			db.Graph.Table(enpHelp.TableName()).Select("distinct endpoint").Where("endpoint in (?)", u.ArrStringsToStringMust(endpoints))
+		}
+		
+		db.Graph.Table(counterHelp.TableName()).Select("distinct counter").Where(tagFilter).Where(endpointFilter).Where(metricFilter).Scan(&counterRes)
+		if len(counterRes) == 0 {
+			continue
+		}
+
+		for _, enp := range enpRes {
+			for _, counter := range counterRes {
+				resp, err := fetchData(enp, counter, inputs.ConsolFun, inputs.From, inputs.Until, inputs.Step)
+				if err != nil {
+					log.Debugf("query graph got error with: %v", inputs)
+				} else {
+					respList = append(respList, resp)
+				}
+			}
+		}
+	}
+	c.JSON(200, respList)
 	return
 }
