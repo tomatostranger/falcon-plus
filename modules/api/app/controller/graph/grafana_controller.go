@@ -557,10 +557,7 @@ func GrafanaMultiQuery(c *gin.Context) {
 func typeResponseDefault(limit int) (typeOutputs []APIGrafanaMainQueryOutputs) {
 	typeOutputs = []APIGrafanaMainQueryOutputs{}
 	typeTag := APIGrafanaMainQueryOutputs{Expandable: true, Text: "tag#",}
-	typeEndpoint := APIGrafanaMainQueryOutputs{Expandable: true, Text: "endpoint#",}
-	typeMetric := APIGrafanaMainQueryOutputs{Expandable: true, Text: "metric#",}
-	typeEnd := APIGrafanaMainQueryOutputs{Expandable: false, Text: "!",}
-	typeOutputs = append(typeOutputs, typeTag, typeEndpoint, typeMetric, typeEnd)
+	typeOutputs = append(typeOutputs, typeTag)
 	return
 }
 
@@ -624,6 +621,10 @@ func multiTypeRegexp(regexKey string, limit int) (result []APIGrafanaMainQueryOu
 			}else {
 				typeString = []string {"metric#"}
 			}
+			result = append(result, APIGrafanaMainQueryOutputs{
+				Text: "!",
+				Expandable: false,
+			})
 		default: typeString = []string{}
 		}
 		for _, str := range typeString {
@@ -632,10 +633,6 @@ func multiTypeRegexp(regexKey string, limit int) (result []APIGrafanaMainQueryOu
 				Expandable: true,
 			})
 		}
-		result = append(result, APIGrafanaMainQueryOutputs{
-			Text: "!",
-			Expandable: false,
-		})
 	} else {
 
 		tagHelp := m.TagEndpoint{}
@@ -649,16 +646,15 @@ func multiTypeRegexp(regexKey string, limit int) (result []APIGrafanaMainQueryOu
 		switch additionItem.Level {
 		case 0:
 			// 返回所有其他 tag
-			db.Graph.Table(tagHelp.TableName()).Select("distinct tag").Where("tag not in (?)", tags).Limit(limit).Scan(&tagRes)
+			var tagFilter string
+			if len(tags) > 0 {
+				tagFilter = fmt.Sprintf("tag not in (%s)", u.ArrStringsToStringMust(tags))
+			}
+			db.Graph.Table(tagHelp.TableName()).Select("distinct tag").Where(tagFilter).Limit(limit).Scan(&tagRes)
+			// db.Graph.Table(tagHelp.TableName()).Select("distinct tag").Where("tag not in (?)", tags).Limit(limit).Scan(&tagRes)
 			for _, tag := range tagRes {
 				result = append(result, APIGrafanaMainQueryOutputs{
 					Text: tag.Tag + "#",
-					Expandable: true,
-				})
-			}
-			if len(tags) == 0 {
-				result = append(result, APIGrafanaMainQueryOutputs{
-					Text: "*#",
 					Expandable: true,
 				})
 			}
@@ -667,10 +663,20 @@ func multiTypeRegexp(regexKey string, limit int) (result []APIGrafanaMainQueryOu
 			// 返回 tags 下的其他 endpoint
 			if len(tags) > 0 && tags[0] == "*"{
 				// select distinct endpoint from endpoint where endpoint not in endpoints;
-				db.Graph.Table(enpHelp.TableName()).Select("distinct endpoint").Where("endpoint not in (?)", endpoints).Limit(limit).Scan(&enpRes)
+				var endpointFilter string
+				if len(endpoints) > 0 {
+					endpointFilter = fmt.Sprintf("endpoint not in (%s)", u.ArrStringsToStringMust(endpoints))
+				}
+				db.Graph.Table(enpHelp.TableName()).Select("distinct endpoint").Where(endpointFilter).Limit(limit).Scan(&enpRes)
+				// db.Graph.Table(enpHelp.TableName()).Select("distinct endpoint").Where("endpoint not in (?)", endpoints).Limit(limit).Scan(&enpRes)
 			}else{
 				// select distinct endpoint_id from tag_endpoint where tag in tags;
-				db.Graph.Table(tagHelp.TableName()).Select("distinct endpoint_id").Where("tag in (?)", tags).Scan(&tagRes)
+				var tagFilter string
+				if len(tags) > 0 {
+					tagFilter = fmt.Sprintf("tag in (%s)", tags)
+				}
+				db.Graph.Table(tagHelp.TableName()).Select("distinct endpoint_id").Where(tagFilter).Scan(&tagRes)
+				// db.Graph.Table(tagHelp.TableName()).Select("distinct endpoint_id").Where("tag in (?)", tags).Scan(&tagRes)
 				var enpIds []int
 				for _, tag := range tagRes {
 					enpIds = append(enpIds, tag.EndpointID)
@@ -694,12 +700,6 @@ func multiTypeRegexp(regexKey string, limit int) (result []APIGrafanaMainQueryOu
 					Expandable: true,
 				})
 			}
-			if len(tags) > 0 && tags[0] != "*" && len(endpoints) == 0  {
-				result = append(result, APIGrafanaMainQueryOutputs{
-					Text: "*#",
-					Expandable: true,
-				})
-			}
 
 		case 2:
 			// 返回有 tags 且属于 endpoints 的其他 metric
@@ -707,7 +707,7 @@ func multiTypeRegexp(regexKey string, limit int) (result []APIGrafanaMainQueryOu
 			if len(tags) > 0 && tags[0] == "*" {
 				// select * from endpoint_counter join endpoint on endpoint_counter.endpoint_id = endpoint.id and endpoint.endpoint in [endpoints] and [metricExclude]
 				metricExclude := metricRelatedCounterExclude(metrics)
-				db.Graph.Table("endpoint_counter").Select("distinct endpoint_counter.counter").
+				db.Graph.Table("endpoint_counter").Select("distinct substring_index(endpoint_counter.counter, '/', 1) as counter").
 				Joins("left join endpoint on endpoint_counter.endpoint_id = endpoint.id").
 				Where("endpoint.endpoint  in (?)", endpoints).Where(metricExclude).
 				Limit(limit).Scan(&counterRes)
@@ -718,13 +718,13 @@ func multiTypeRegexp(regexKey string, limit int) (result []APIGrafanaMainQueryOu
 					// select * from endpoint_counter where (counter like  tagSql) and (counter not regrexp metricsql)
 					tagFilter := tagRelatedCounterFilter(tags)
 					metricExclude := metricRelatedCounterExclude(metrics)
-					db.Graph.Table(counterHelp.TableName()).Select("distinct counter").Where(tagFilter).Where(metricExclude).Limit(limit).Scan(&counterRes)
+					db.Graph.Table(counterHelp.TableName()).Select("distinct substring_index(endpoint_counter.counter, '/', 1) as counter").Where(tagFilter).Where(metricExclude).Limit(limit).Scan(&counterRes)
 
 				}else{
 					// select * from endpoint_counter join endpoint on endpoint_counter.endpoint_id = endpoint.id and endpoint.endpoint in [endpoints] and [metricExclude] and [tagFilter]
 					tagFilter := tagRelatedCounterFilter(tags)
 					metricExclude := metricRelatedCounterExclude(metrics)
-					db.Graph.Table("endpoint_counter").Select("distinct endpoint_counter.counter").
+					db.Graph.Table("endpoint_counter").Select("distinct substring_index(endpoint_counter.counter, '/', 1) as counter").
 					Joins("left join endpoint on endpoint_counter.endpoint_id = endpoint.id").
 					Where(tagFilter).Where("endpoint.endpoint  in (?)", endpoints).Where(metricExclude).
 					Limit(limit).Scan(&counterRes)
@@ -732,7 +732,7 @@ func multiTypeRegexp(regexKey string, limit int) (result []APIGrafanaMainQueryOu
 			}
 			for _, counter := range counterRes {
 				result = append(result, APIGrafanaMainQueryOutputs{
-					Text: counter.Counter,
+					Text: counter.Counter + "#",
 					Expandable: true,
 				})
 			}
@@ -806,7 +806,12 @@ func parseMultiTypeHelp(regexKey string) (tags []string, endpoints []string, met
 	// 对于不想指定的属性，通过填写 *# 来代表所有，如 tag##region=beijing3##*##downtime
 	// 其中 * 代表所有的 endpoint，代表查询 tag 为 region=beijing3 的所有 endpoint 的 downtime 指标
 	// todo 对于异常的 query 需要反馈给前端
-
+	re := regexp.MustCompile(`#\.\*$`)
+	regexKey = re.ReplaceAllString(regexKey, "#")
+	re = regexp.MustCompile(`\*#`)
+	regexKey = re.ReplaceAllString(regexKey, "*##")
+	re = regexp.MustCompile(`##$`)
+        regexKey = re.ReplaceAllString(regexKey, "")
 	parts := trimSplitHelper(regexKey, "##")
 	log.Debug(parts)
 
