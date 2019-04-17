@@ -564,11 +564,12 @@ func typeResponseDefault(limit int) (typeOutputs []APIGrafanaMainQueryOutputs) {
 func tagRelatedCounterFilter(tags []string) (tagFilter string) {
 	var tagSlice []string
 	for _, tag := range tags {
-		tagSlice = append(tagSlice, fmt.Sprintf("counter like '%%%s%%'", tag))
+		tagSlice = append(tagSlice, fmt.Sprintf("endpoint_counter.counter like '%%%s%%'", tag))
 	}
-	tagFilter = strings.Join(tagSlice, "and")
+	tagFilter = strings.Join(tagSlice, " and ")
 	return
 }
+
 
 func endpointRelatedFilter(endpoints []string) (endpointFilter string){
 	log.Debug("in endpoint related filter")
@@ -583,18 +584,19 @@ func endpointRelatedFilter(endpoints []string) (endpointFilter string){
 func metricRelatedCounterExclude(metrics []string) (metricExclude string) {
 	var metricSlice []string
 	for _, metric := range metrics {
-		metricSlice = append(metricSlice, fmt.Sprintf("counter not regexp '^%s/'", metric))
+		metricSlice = append(metricSlice, fmt.Sprintf("endpoint_counter.counter not regexp '^%s/'", metric))
 	}
-	metricExclude = strings.Join(metricSlice, "and")
+	metricExclude = strings.Join(metricSlice, " and ")
 	return
 }
 
 func metricRelatedCounterFilter(metrics []string) (metricFilter string) {
 	var metricSlice []string
 	for _, metric := range metrics {
-		metricSlice = append(metricSlice, fmt.Sprintf("counter like '%s/%%'", metric))
+		metricSlice = append(metricSlice, fmt.Sprintf("endpoint_counter.counter like '%s/%%'", metric))
 	}
-	metricFilter = strings.Join(metricSlice, "or")	
+	metricFilter = strings.Join(metricSlice, " or ")
+	return 
 }
 
 
@@ -717,7 +719,7 @@ func multiTypeRegexp(regexKey string, limit int) (result []APIGrafanaMainQueryOu
 				// select * from endpoint_counter join endpoint on endpoint_counter.endpoint_id = endpoint.id and endpoint.endpoint in [endpoints] and [metricExclude]
 				metricExclude := metricRelatedCounterExclude(metrics)
 				db.Graph.Table("endpoint_counter").Select("distinct substring_index(endpoint_counter.counter, '/', 1) as counter").
-				Joins("left join endpoint on endpoint_counter.endpoint_id = endpoint.id").
+				Joins("join endpoint on endpoint_counter.endpoint_id = endpoint.id").
 				Where("endpoint.endpoint  in (?)", endpoints).Where(metricExclude).
 				Limit(limit).Scan(&counterRes)
 
@@ -734,7 +736,7 @@ func multiTypeRegexp(regexKey string, limit int) (result []APIGrafanaMainQueryOu
 					tagFilter := tagRelatedCounterFilter(tags)
 					metricExclude := metricRelatedCounterExclude(metrics)
 					db.Graph.Table("endpoint_counter").Select("distinct substring_index(endpoint_counter.counter, '/', 1) as counter").
-					Joins("left join endpoint on endpoint_counter.endpoint_id = endpoint.id").
+					Joins("join endpoint on endpoint_counter.endpoint_id = endpoint.id").
 					Where(tagFilter).Where("endpoint.endpoint  in (?)", endpoints).Where(metricExclude).
 					Limit(limit).Scan(&counterRes)
 				}
@@ -808,7 +810,7 @@ func validateDataStarValue(parts []string) (err error) {
 	return nil
 }
 
-func formatInputHelp(regexKey string) (parts []string, err error) {
+func formatInputHelp(regexKey string) (formatParts []string, err error) {
 	// 切除query 末尾的 .*
 	re := regexp.MustCompile(`#\.\*$`)
 	regexKey = re.ReplaceAllString(regexKey, "#")
@@ -823,26 +825,32 @@ func formatInputHelp(regexKey string) (parts []string, err error) {
 	regexKey = re.ReplaceAllString(regexKey, "")
 
 	log.Debug(regexKey)
-	
+
 	// 切分 query
 	parts := trimSplitHelper(regexKey, "##")
-	log.Debug(parts)
+
+	for _, part := range parts {
+		re = regexp.MustCompile(`#`)
+		partTmp := re.ReplaceAllString(part, ".")
+		formatParts = append(formatParts, partTmp)
+	}
+	log.Debug(formatParts)
 
 	// 验证合法性
 	// 1. query 串从解析顺序为 tag -> endpoint -> metric -> !, 否则返回 err
 	// 2. query 数据中应该不超过 1 个 *
 
-	err = validateTypeOrder(parts)
+	err = validateTypeOrder(formatParts)
 	if err != nil {
 		return
 	}
 
-	err = validateDataStarValue(parts)
+	err = validateDataStarValue(formatParts)
 	if err != nil {
 		return
 	}
 
-	return parts, nil
+	return 
 }
 
 
@@ -852,7 +860,11 @@ func parseMultiTypeHelp(regexKey string) (tags []string, endpoints []string, met
 	// 对于不想指定的属性，通过填写 * 来代表所有，如 tag##region=beijing3##*##downtime
 	// 其中 * 代表所有的 endpoint，代表查询 tag 为 region=beijing3 的所有 endpoint 的 downtime 指标
 	// todo 对于异常的 query 需要反馈给前端
-	parts := formatInputHelp(regexKey)
+	parts, formatErr:= formatInputHelp(regexKey)
+	if formatErr != nil {
+		err = formatErr
+		return
+	}
 
 	// 对于一条 query，需要判断接下来返回的是控制层级还是数据层级，如果是控制层级，该返回哪个层级；如果是数据层级，返回哪个层级的数据
 	// 需要两个参数：type，level （1/2/3/-1）
@@ -939,13 +951,15 @@ func GrafanaMultiRender(c *gin.Context) {
 		}
 		enpHelp := m.Endpoint{}
 		enpRes := []m.Endpoint{}
-		counterHelp := m.EndpointCounter{}
-		counterRes := []m.EndpointCounter{}
-
+		type CounterEnpRes struct {
+			Counter		string
+			Endpoint	string
+		}
+		var counterEnpRes []CounterEnpRes
 		var tagFilter string
 		var endpointFilter string
 		var metricFilter string
-		
+
 		if len(tags) > 0 {
 			tagFilter = tagRelatedCounterFilter(tags)
 		}
@@ -957,26 +971,38 @@ func GrafanaMultiRender(c *gin.Context) {
 		// tags 和 endpoints 中最多一个为 *
 		if len(endpoints) > 0 && endpoints[0] == "*" {
 			// 通过 tag 来进行一层过滤，提高查询性能
-			// select * from endpoint left join tag_endpoint on endpoint.id = tag_endpoint.endpoint_id where tag_endpoint.tag in (?)
-			db.Graph.Table("endpoint").Select("distinct endpoint").Joins("left join tag_endpoint on endpoint.id = tag_endpoint.endpoint_id").
-			Where("tag.tag in (?)", u.ArrStringsToStringMust(tags)).Scan(&enpRes)
+			// select * from endpoint join tag_endpoint on endpoint.id = tag_endpoint.endpoint_id where tag_endpoint.tag in (?)
+			db.Graph.Table("endpoint").Select("distinct endpoint.endpoint").
+			Joins("join tag_endpoint on endpoint.id = tag_endpoint.endpoint_id").
+			Where("tag_endpoint.tag in (?)", tags).Group("endpoint.id").
+			Having("count(tag_endpoint.tag) = ?", len(tags)).Scan(&enpRes)
+
+			db.Graph.Table("endpoint_counter").Select("endpoint_counter.counter, endpoint.endpoint").
+			Joins("join endpoint on endpoint_counter.endpoint_id = endpoint.id").
+			Where(tagFilter).Where(metricFilter).Scan(&counterEnpRes)
 		} else{
-			db.Graph.Table(enpHelp.TableName()).Select("distinct endpoint").Where("endpoint in (?)", u.ArrStringsToStringMust(endpoints))
+			db.Graph.Table(enpHelp.TableName()).Select("distinct endpoint").Where("endpoint in (?)", endpoints).Scan(&enpRes)
+			if len(tags) > 0 && tags[0] == "*" {
+				db.Graph.Table("endpoint_counter").Select("endpoint_counter.counter, endpoint.endpoint").
+				Joins("join endpoint on endpoint_counter.endpoint_id = endpoint.id").
+				Where(endpointFilter).Where(metricFilter).Scan(&counterEnpRes)
+			} else {
+				db.Graph.Table("endpoint_counter").Select("endpoint_counter.counter, endpoint.endpoint").
+				Joins("join endpoint on endpoint_counter.endpoint_id = endpoint.id").
+				Where(tagFilter).Where(endpointFilter).Where(metricFilter).Scan(&counterEnpRes)
+			}
 		}
-		
-		db.Graph.Table(counterHelp.TableName()).Select("distinct counter").Where(tagFilter).Where(endpointFilter).Where(metricFilter).Scan(&counterRes)
-		if len(counterRes) == 0 {
+
+		if len(counterEnpRes) == 0 {
 			continue
 		}
 
-		for _, enp := range enpRes {
-			for _, counter := range counterRes {
-				resp, err := fetchData(enp, counter, inputs.ConsolFun, inputs.From, inputs.Until, inputs.Step)
-				if err != nil {
-					log.Debugf("query graph got error with: %v", inputs)
-				} else {
-					respList = append(respList, resp)
-				}
+		for _, res := range counterEnpRes {
+			resp, err := fetchData(res.Endpoint, res.Counter, inputs.ConsolFun, inputs.From, inputs.Until, inputs.Step)
+			if err != nil {
+				log.Debugf("query graph got error with: %v", inputs)
+			} else {
+				respList = append(respList, resp)
 			}
 		}
 	}
