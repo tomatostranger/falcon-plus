@@ -564,6 +564,9 @@ func typeResponseDefault(limit int) (typeOutputs []APIGrafanaMainQueryOutputs) {
 func tagRelatedCounterFilter(tags []string) (tagFilter string) {
 	var tagSlice []string
 	for _, tag := range tags {
+		if tag == "*" {
+			return
+		}
 		tagSlice = append(tagSlice, fmt.Sprintf("endpoint_counter.counter like '%%%s%%'", tag))
 	}
 	tagFilter = strings.Join(tagSlice, " and ")
@@ -572,8 +575,11 @@ func tagRelatedCounterFilter(tags []string) (tagFilter string) {
 
 
 func endpointRelatedFilter(endpoints []string) (endpointFilter string){
-	log.Debug("in endpoint related filter")
-	log.Debug(endpoints)
+	for _, endpoint := range endpoints {
+		if endpoint == "*" {
+			return
+		}
+	}
 	endpointString := u.ArrStringsToStringMust(endpoints)
 	log.Debug(endpointString)
 	endpointFilter = fmt.Sprintf("endpoint.endpoint in (%s)", endpointString)
@@ -596,7 +602,7 @@ func metricRelatedCounterFilter(metrics []string) (metricFilter string) {
 		metricSlice = append(metricSlice, fmt.Sprintf("endpoint_counter.counter like '%s/%%'", metric))
 	}
 	metricFilter = strings.Join(metricSlice, " or ")
-	return 
+	return
 }
 
 
@@ -949,49 +955,18 @@ func GrafanaMultiRender(c *gin.Context) {
 			log.Error(fmt.Sprintf("render query should contain at least one metric"))
 			continue
 		}
-		enpHelp := m.Endpoint{}
-		enpRes := []m.Endpoint{}
 		type CounterEnpRes struct {
 			Counter		string
 			Endpoint	string
 		}
 		var counterEnpRes []CounterEnpRes
-		var tagFilter string
-		var endpointFilter string
-		var metricFilter string
+		tagFilter := tagRelatedCounterFilter(tags)
+		endpointFilter :=  endpointRelatedFilter(endpoints)
+		metricFilter := metricRelatedCounterFilter(metrics)
 
-		if len(tags) > 0 {
-			tagFilter = tagRelatedCounterFilter(tags)
-		}
-		if len(endpoints) > 0 {
-			endpointFilter = endpointRelatedFilter(endpoints)
-		}
-		metricFilter = metricRelatedCounterFilter(metrics)
-
-		// tags 和 endpoints 中最多一个为 *
-		if len(endpoints) > 0 && endpoints[0] == "*" {
-			// 通过 tag 来进行一层过滤，提高查询性能
-			// select * from endpoint join tag_endpoint on endpoint.id = tag_endpoint.endpoint_id where tag_endpoint.tag in (?)
-			db.Graph.Table("endpoint").Select("distinct endpoint.endpoint").
-			Joins("join tag_endpoint on endpoint.id = tag_endpoint.endpoint_id").
-			Where("tag_endpoint.tag in (?)", tags).Group("endpoint.id").
-			Having("count(tag_endpoint.tag) = ?", len(tags)).Scan(&enpRes)
-
-			db.Graph.Table("endpoint_counter").Select("endpoint_counter.counter, endpoint.endpoint").
-			Joins("join endpoint on endpoint_counter.endpoint_id = endpoint.id").
-			Where(tagFilter).Where(metricFilter).Scan(&counterEnpRes)
-		} else{
-			db.Graph.Table(enpHelp.TableName()).Select("distinct endpoint").Where("endpoint in (?)", endpoints).Scan(&enpRes)
-			if len(tags) > 0 && tags[0] == "*" {
-				db.Graph.Table("endpoint_counter").Select("endpoint_counter.counter, endpoint.endpoint").
-				Joins("join endpoint on endpoint_counter.endpoint_id = endpoint.id").
-				Where(endpointFilter).Where(metricFilter).Scan(&counterEnpRes)
-			} else {
-				db.Graph.Table("endpoint_counter").Select("endpoint_counter.counter, endpoint.endpoint").
-				Joins("join endpoint on endpoint_counter.endpoint_id = endpoint.id").
-				Where(tagFilter).Where(endpointFilter).Where(metricFilter).Scan(&counterEnpRes)
-			}
-		}
+		db.Graph.Table("endpoint_counter").Select("endpoint_counter.counter, endpoint.endpoint").
+		Joins("join endpoint on endpoint_counter.endpoint_id = endpoint.id").
+		Where(tagFilter).Where(endpointFilter).Where(metricFilter).Scan(&counterEnpRes)
 
 		if len(counterEnpRes) == 0 {
 			continue
