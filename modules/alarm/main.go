@@ -56,8 +56,7 @@ func main() {
 	cron.InitSenderWorker()
 
 	go http.Start()
-	go cron.ReadHighEvent()
-	go cron.ReadLowEvent()
+	go.cron.ReadAllEvent()
 	go cron.CombineSms()
 	go cron.CombineMail()
 	go cron.CombineIM()
