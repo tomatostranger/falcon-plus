@@ -16,6 +16,8 @@ package cron
 
 import (
 	"encoding/json"
+	"time"
+	"sort"
 	log "github.com/Sirupsen/logrus"
 
 	cmodel "github.com/open-falcon/falcon-plus/common/model"
@@ -23,6 +25,118 @@ import (
 	"github.com/open-falcon/falcon-plus/modules/alarm/g"
 	"github.com/open-falcon/falcon-plus/modules/alarm/redi"
 )
+
+func consumeAll(event *cmodel.Event) {
+	actionId := event.ActionId()
+	if actionId <= 0 {
+		return
+	}
+
+	action := api.GetAction(actionId)
+	if action == nil {
+		return
+	}
+
+	if action.Callback == 1 {
+		HandleCallback(event, action)
+	}
+	consumeAllEvents(event)
+}
+
+func consumeAllEvents(event *cmodel.Event) {
+	if action.Uic == "" {
+		return
+	}
+	
+	phones, mails, ims := api.ParseTeams(action.Uic)
+
+	smsContent := GenerateSmsContent(event)
+	mailContent := GenerateMailContent(event)
+	imContent := GenerateIMContent(event)
+
+	// <=P2 才发送短信
+	if event.Priority() < 3 {
+		redi.WriteSms(phones, smsContent)
+	}
+
+	redi.WriteIM(ims, imContent)
+	ParseUserAllMail(event, action)
+
+}
+
+func ParseUserAllMail(event *cmodel.Event, action *api.Action) {
+	userMap := api.GetUsers(action.Uic)
+
+	metric := event.Metric()
+	subject := GenerateSmsContent(event)
+	content := GenerateMailContent(event)
+	status := event.Status
+	priority := event.Priority()
+
+	queue := g.Config().Redis.UserMailQueue
+
+	rc := g.RedisConnPool.Get()
+	defer rc.Close()
+
+	_, mails, _ := api.ParseTeams(action.Uic)
+	smsContent := GenerateSmsContent(event)
+	mailContent := GenerateMailContent(event)
+
+	for _, user := range userMap {
+		dto := MailDto{
+			Priority: priority,
+			Metric:   metric,
+			Subject:  subject,
+			Content:  content,
+			Email:    user.Email,
+			Status:   status,
+		}
+		key := fmt.Sprintf("%d%s%s%s", dto.Priority, dto.Status, dto.Email, dto.Metric)
+
+		if _, ok := KeyToTimestampMap[key]; ok {
+			sort.Ints(KeyToTimestampMap[key])
+			now = time.Now()
+			keyNum := GetKeyNum(KeyToTimestampMap[key], now)
+			
+			if keyNum < 4 {
+				// direct write mail
+				redi.WriteMail(mails, smsContent, mailContent)
+			} else{
+				// go combine
+				bs, err := json.Marshal(dto)
+				if err != nil {
+					log.Error("json marshal MailDto fail:", err)
+					continue
+				}
+
+				_, err = rc.Do("LPUSH", queue, string(bs))
+				if err != nil {
+					log.Error("LPUSH redis", queue, "fail:", err, "dto:", string(bs))
+				}
+			}
+			KeyToTimestampMap[key][0], KeyToTimestampMap[key][1], KeyToTimestampMap[key][2] = KeyToTimestampMap[key][1], KeyToTimestampMap[key][2], now
+
+		} else {
+			KeyToTimestampMap[key] = append(KeyToTimestampMap[key], time.Now())
+		}
+		
+	}
+}
+
+func GetKeyNum(sortedHistory []int, now Time) int {
+	
+	if now.sub(sortedHistory[2]) > time.Minute * 5 {
+		return 1
+	} else if sortedHistory[2].sub(sortedHistory[1]) > time.Minute * 5 {
+		return 2
+	} else if sortedHistory[1].sub(sortedHistory[0]) > time.Minute * 5 {
+		return 3
+	} else {
+		return 4
+	}
+}
+
+
 
 func consume(event *cmodel.Event, isHigh bool) {
 	actionId := event.ActionId()
