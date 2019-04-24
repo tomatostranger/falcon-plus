@@ -16,8 +16,8 @@ package cron
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
-	"sort"
 	log "github.com/Sirupsen/logrus"
 
 	cmodel "github.com/open-falcon/falcon-plus/common/model"
@@ -40,18 +40,18 @@ func consumeAll(event *cmodel.Event) {
 	if action.Callback == 1 {
 		HandleCallback(event, action)
 	}
-	consumeAllEvents(event)
+	consumeAllEvents(event, action)
 }
 
-func consumeAllEvents(event *cmodel.Event) {
+func consumeAllEvents(event *cmodel.Event, action *api.Action) {
 	if action.Uic == "" {
 		return
 	}
-	
-	phones, mails, ims := api.ParseTeams(action.Uic)
+
+	phones, _, ims := api.ParseTeams(action.Uic)
 
 	smsContent := GenerateSmsContent(event)
-	mailContent := GenerateMailContent(event)
+	//mailContent := GenerateMailContent(event)
 	imContent := GenerateIMContent(event)
 
 	// <=P2 才发送短信
@@ -94,10 +94,10 @@ func ParseUserAllMail(event *cmodel.Event, action *api.Action) {
 		key := fmt.Sprintf("%d%s%s%s", dto.Priority, dto.Status, dto.Email, dto.Metric)
 
 		if _, ok := KeyToTimestampMap[key]; ok {
-			sort.Ints(KeyToTimestampMap[key])
-			now = time.Now()
+			//sort.Ints(KeyToTimestampMap[key])
+			now := time.Now()
 			keyNum := GetKeyNum(KeyToTimestampMap[key], now)
-			
+
 			if keyNum < 4 {
 				// direct write mail
 				redi.WriteMail(mails, smsContent, mailContent)
@@ -119,20 +119,39 @@ func ParseUserAllMail(event *cmodel.Event, action *api.Action) {
 		} else {
 			KeyToTimestampMap[key] = append(KeyToTimestampMap[key], time.Now())
 		}
-		
+
 	}
 }
 
-func GetKeyNum(sortedHistory []int, now Time) int {
-	
-	if now.sub(sortedHistory[2]) > time.Minute * 5 {
+func GetKeyNum(sortedHistory []time.Time, now time.Time) int {
+	switch len(sortedHistory) {
+	case 0:
 		return 1
-	} else if sortedHistory[2].sub(sortedHistory[1]) > time.Minute * 5 {
-		return 2
-	} else if sortedHistory[1].sub(sortedHistory[0]) > time.Minute * 5 {
-		return 3
-	} else {
-		return 4
+	case 1:
+		if now.Sub(sortedHistory[0]) > time.Minute * 5 {
+			return 1
+		} else {
+			return 2
+		}
+	case 2:
+		if now.Sub(sortedHistory[1]) > time.Minute * 5 {
+			return 1
+		} else if sortedHistory[1].Sub(sortedHistory[0]) > time.Minute * 5 {
+			return 2
+		} else {
+			return 3
+		}
+	case 3:
+		if now.Sub(sortedHistory[2]) > time.Minute * 5 {
+			return 1
+		} else if sortedHistory[2].Sub(sortedHistory[1]) > time.Minute * 5 {
+			return 2
+		} else if sortedHistory[1].Sub(sortedHistory[0]) > time.Minute * 5 {
+			return 3
+		} else {
+			return 4
+		}
+	default: return 1
 	}
 }
 
