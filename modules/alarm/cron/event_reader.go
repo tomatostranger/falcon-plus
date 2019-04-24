@@ -25,6 +25,25 @@ import (
 	eventmodel "github.com/open-falcon/falcon-plus/modules/alarm/model/event"
 )
 
+KeyToTimestampMap := make(map[string][]Time)
+
+func ReadAllEvent() {
+	highQueues := g.Config().Redis.HighQueues
+	lowQueues := g.Config().Redis.LowQueues
+	queues := append(highQueues, lowQueues...)
+	if len(queues) == 0 {
+		return
+	}
+	for {
+		event, err := popEvent(queues)
+		if err != nil {
+			time.Sleep(time.Second)
+			continue
+		}
+		consumeAll(event)
+	}
+}
+
 func ReadHighEvent() {
 	queues := g.Config().Redis.HighQueues
 	if len(queues) == 0 {
