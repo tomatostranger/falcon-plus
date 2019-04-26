@@ -96,7 +96,7 @@ func ParseUserAllMail(event *cmodel.Event, action *api.Action) {
 		if _, ok := KeyToTimestampMap[key]; ok {
 			//sort.Ints(KeyToTimestampMap[key])
 			now := time.Now()
-			keyNum := GetKeyNum(KeyToTimestampMap[key], now)
+			keyNum := getKeyNum(KeyToTimestampMap[key], now)
 
 			if keyNum < 4 {
 				// direct write mail
@@ -117,44 +117,26 @@ func ParseUserAllMail(event *cmodel.Event, action *api.Action) {
 			KeyToTimestampMap[key][0], KeyToTimestampMap[key][1], KeyToTimestampMap[key][2] = KeyToTimestampMap[key][1], KeyToTimestampMap[key][2], now
 
 		} else {
-			KeyToTimestampMap[key] = append(KeyToTimestampMap[key], time.Now())
+			now := time.Now()
+			initHistory := []time.Time{now, now, now}
+			KeyToTimestampMap[key] = append(KeyToTimestampMap[key], initHistory...)
 		}
 
 	}
 }
 
-func GetKeyNum(sortedHistory []time.Time, now time.Time) int {
-	switch len(sortedHistory) {
-	case 0:
+
+func getKeyNum(sortedHistory []time.Time, now time.Time) int {
+	if now.Sub(sortedHistory[2]) > time.Minute * 5 {
 		return 1
-	case 1:
-		if now.Sub(sortedHistory[0]) > time.Minute * 5 {
-			return 1
-		} else {
-			return 2
-		}
-	case 2:
-		if now.Sub(sortedHistory[1]) > time.Minute * 5 {
-			return 1
-		} else if sortedHistory[1].Sub(sortedHistory[0]) > time.Minute * 5 {
-			return 2
-		} else {
-			return 3
-		}
-	case 3:
-		if now.Sub(sortedHistory[2]) > time.Minute * 5 {
-			return 1
-		} else if sortedHistory[2].Sub(sortedHistory[1]) > time.Minute * 5 {
-			return 2
-		} else if sortedHistory[1].Sub(sortedHistory[0]) > time.Minute * 5 {
-			return 3
-		} else {
-			return 4
-		}
-	default: return 1
+	} else if sortedHistory[2].Sub(sortedHistory[1]) > time.Minute * 5 {
+		return 2
+	} else if sortedHistory[1].Sub(sortedHistory[0]) > time.Minute * 5 {
+		return 3
+	} else {
+		return 4
 	}
 }
-
 
 
 func consume(event *cmodel.Event, isHigh bool) {
