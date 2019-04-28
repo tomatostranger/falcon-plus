@@ -24,8 +24,15 @@ import (
 	"github.com/open-falcon/falcon-plus/modules/alarm/g"
 	eventmodel "github.com/open-falcon/falcon-plus/modules/alarm/model/event"
 )
-var now = time.Now()
-var KeyToTimestampMap = make(map[string][]time.Time)
+
+type History []time.Time
+
+func (h History) Len() int {return len(h)}
+func (h History) Swap(i, j int) {h[i], h[j] = h[j], h[i]}
+func (h History) Less(i, j int) bool {return h[i].Before(h[j])}
+
+var KeyToTimestampMap = make(map[string]History)
+
 
 func ReadAllEvent() {
 	highQueues := g.Config().Redis.HighQueues
@@ -118,3 +125,4 @@ func popEvent(queues []string) (*cmodel.Event, error) {
 
 	return &event, nil
 }
+

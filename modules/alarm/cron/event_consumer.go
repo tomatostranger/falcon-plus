@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+	"sort"
 	log "github.com/Sirupsen/logrus"
 
 	cmodel "github.com/open-falcon/falcon-plus/common/model"
@@ -94,9 +95,12 @@ func ParseUserAllMail(event *cmodel.Event, action *api.Action) {
 		key := fmt.Sprintf("%d%s%s%s", dto.Priority, dto.Status, dto.Email, dto.Metric)
 
 		if _, ok := KeyToTimestampMap[key]; ok {
-			//sort.Ints(KeyToTimestampMap[key])
 			now := time.Now()
-			keyNum := getKeyNum(KeyToTimestampMap[key], now)
+			history := KeyToTimestampMap[key]
+			sort.Sort(history)
+			log.Infof("history: %v", history)
+			keyNum := getKeyNum(history, now)
+			log.Infof("key num: %v", keyNum)
 
 			if keyNum < 4 {
 				// direct write mail
@@ -114,24 +118,26 @@ func ParseUserAllMail(event *cmodel.Event, action *api.Action) {
 					log.Error("LPUSH redis", queue, "fail:", err, "dto:", string(bs))
 				}
 			}
-			KeyToTimestampMap[key][0], KeyToTimestampMap[key][1], KeyToTimestampMap[key][2] = KeyToTimestampMap[key][1], KeyToTimestampMap[key][2], now
+			history = append(history, now)
+			sort.Sort(history)
+			KeyToTimestampMap[key] = history[1:]
 
 		} else {
-			now := time.Now()
-			initHistory := []time.Time{now, now, now}
-			KeyToTimestampMap[key] = append(KeyToTimestampMap[key], initHistory...)
+			initTime := time.Now().AddDate(-1, 0, 0)
+			initHistory := History{initTime, initTime, initTime}
+			KeyToTimestampMap[key] = initHistory
 		}
 
 	}
 }
 
 
-func getKeyNum(sortedHistory []time.Time, now time.Time) int {
-	if now.Sub(sortedHistory[2]) > time.Minute * 5 {
+func getKeyNum(history History, now time.Time) int {
+	if now.Sub(history[2]) > time.Minute * 5 {
 		return 1
-	} else if sortedHistory[2].Sub(sortedHistory[1]) > time.Minute * 5 {
+	} else if history[2].Sub(history[1]) > time.Minute * 5 {
 		return 2
-	} else if sortedHistory[1].Sub(sortedHistory[0]) > time.Minute * 5 {
+	} else if history[1].Sub(history[0]) > time.Minute * 5 {
 		return 3
 	} else {
 		return 4
